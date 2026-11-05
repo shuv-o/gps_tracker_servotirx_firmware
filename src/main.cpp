@@ -95,6 +95,7 @@ struct State {
   bool registered = false;
   bool dataUp = false;
   bool internetOk = false;
+  bool useHttps = false;      // carrier intercepts plain HTTP -> use HTTPS
   bool gnssOn = false;
   bool gnssFixed = false;
   GnssFix fix;
@@ -217,39 +218,79 @@ static String httpStatusText(int code) {
   }
 }
 
+static String g_lastRedirect;   // Location header of the last 3xx reply
+
+static bool sslReady = false;
+static void setupSsl() {
+  if (sslReady) return;
+  modem.cmd("AT+CSSLCFG=\"sslversion\",0,4", 2000);   // all TLS versions
+  modem.cmd("AT+CSSLCFG=\"authmode\",0,0", 2000);     // no certificate check (test only)
+  modem.cmd("AT+CSSLCFG=\"enableSNI\",0,1", 2000);
+  sslReady = true;
+}
+
+// "http://x" -> "https://x" when the carrier intercepts plain HTTP
+static String effUrl(const char* url) {
+  String u = url;
+  if (g.useHttps && u.startsWith("http://")) u = "https://" + u.substring(7);
+  return u;
+}
+
 // HTTP GET into the modem's buffer. Time measured from command to +HTTPACTION URC,
 // i.e. the over-the-air download time (UART is not involved in the transfer).
 static bool httpGet(const char* url, int& status, long& len, uint32_t& ms,
                     uint32_t timeoutMs, String& err) {
   status = -1; len = 0; ms = 0;
+  g_lastRedirect = "";
+  String u = effUrl(url);
+  bool https = u.startsWith("https://");
+  if (https) setupSsl();
   modem.cmd("AT+HTTPTERM", 2000);  // ignore result (may not be initialised)
   if (modem.cmd("AT+HTTPINIT", 5000) != AtResult::OK) {
     err = "AT+HTTPINIT failed: " + modem.lastError;
     return false;
   }
-  String c = String("AT+HTTPPARA=\"URL\",\"") + url + "\"";
+  String c = "AT+HTTPPARA=\"URL\",\"" + u + "\"";
   if (modem.cmd(c.c_str(), 3000) != AtResult::OK) {
     err = "AT+HTTPPARA URL failed: " + modem.lastError;
     modem.cmd("AT+HTTPTERM", 2000);
     return false;
   }
+  if (https) modem.cmd("AT+HTTPPARA=\"SSLCFG\",0", 2000);  // ignore if unsupported
   String urc;
   uint32_t t0 = millis();
   AtResult r = modem.cmdUrc("AT+HTTPACTION=0", "+HTTPACTION:", timeoutMs, &urc);
   ms = millis() - t0;
-  modem.cmd("AT+HTTPTERM", 2000);
   if (r != AtResult::OK) {
+    modem.cmd("AT+HTTPTERM", 2000);
     err = "AT+HTTPACTION: " + modem.lastError;
     return false;
   }
   String f[4];
   int n = splitCsv(Modem::field(urc, "+HTTPACTION:"), f, 4);
+  if (n >= 3) { status = f[1].toInt(); len = f[2].toInt(); }
+
+  if (status >= 300 && status < 400) {   // read headers to find out where we are sent
+    String h;
+    if (modem.cmd("AT+HTTPHEAD", 5000, &h) == AtResult::OK) {
+      int p = h.indexOf("ocation:");      // Location: / location:
+      if (p > 0) {
+        int e = h.indexOf('\n', p);
+        g_lastRedirect = h.substring(p + 8, e < 0 ? h.length() : e);
+        g_lastRedirect.trim();
+      }
+    }
+  }
+  modem.cmd("AT+HTTPTERM", 2000);
+
   if (n < 3) { err = "bad +HTTPACTION reply: " + urc; return false; }
-  status = f[1].toInt();
-  len = f[2].toInt();
   if (status < 200 || status >= 400) {
     err = "HTTP " + String(status) + " (" + httpStatusText(status) + ")";
     return false;
+  }
+  if (status >= 300) {
+    err = "HTTP " + String(status) + " redirect" +
+          (g_lastRedirect.length() ? " -> " + g_lastRedirect : String(""));
   }
   return true;
 }
@@ -301,13 +342,15 @@ static bool runSpeedTest(bool is2g, double& bestKbps, String& err) {
   const uint32_t bigTimeout = is2g ? 240000 : 120000;
   const int runs = is2g ? 1 : CFG_SPEED_RUNS_4G;
 
+  if (g.useHttps) note("Using HTTPS (carrier intercepts plain HTTP); TLS may lower the result a little.");
   for (const SpeedServer& s : SPEED_SERVERS) {
     note(String("Server: ") + s.name);
     int st; long len; uint32_t tSmall = 0; String e;
     if (s.small) {
       bool ok = httpGet(s.small, st, len, tSmall, 60000, e);
       if (!ok || st != 200) {
-        note("  baseline request failed: " + (ok ? "HTTP " + String(st) : e));
+        note("  baseline request failed: " + (ok ? "HTTP " + String(st) : e) +
+             (g_lastRedirect.length() ? " -> " + g_lastRedirect : String("")));
         err = String(s.name) + ": " + (ok ? "HTTP " + String(st) : e);
         continue;
       }
@@ -323,7 +366,7 @@ static bool runSpeedTest(bool is2g, double& bestKbps, String& err) {
         info((String("Run ") + (i + 1) + " reply").c_str(),
              "HTTP " + String(st) + ", " + String(len) + " bytes in " + fmtMs(tBig));
         if (!ok || !downloadValid(*f, st, len, e)) {
-          note("  rejected: " + e);
+          note("  rejected: " + e + (g_lastRedirect.length() ? " -> " + g_lastRedirect : String("")));
           err = String(s.name) + ": " + e;
           break;
         }
@@ -895,13 +938,43 @@ static void t_internet(TestCtx& c) {
                 "Network has no internet route / DNS; check APN and data balance");
   info("DNS " CFG_DNS_HOST, String(nAddr) + " addresses in " + fmtMs(dnsMs) + " (" + ips + ")");
 
-  // HTTP
+  // HTTP (plain). google.com/generate_204 must answer 204 - anything else is interception.
+  g.useHttps = false;
   int st; long len; uint32_t ms; String err;
-  if (!httpGet(CFG_HTTP_TEST_URL, st, len, ms, 30000, err))
-    return fail(c, "HTTP GET failed: " + err, "DNS works but TCP/HTTP fails: firewall / APN restrictions");
-  info("HTTP GET", String(st) + " " + httpStatusText(st) + " in " + fmtMs(ms));
-  g.internetOk = true;
-  pass(c, "INTERNET CONNECTED: DNS " + fmtMs(dnsMs) + ", HTTP " + st + " in " + fmtMs(ms));
+  bool ok = httpGet(CFG_HTTP_TEST_URL, st, len, ms, 30000, err);
+  info("HTTP GET", st > 0 ? String(st) + " " + httpStatusText(st) + " in " + fmtMs(ms) : err);
+  if (ok && st >= 200 && st < 300) {
+    g.internetOk = true;
+    return pass(c, "INTERNET CONNECTED: DNS " + fmtMs(dnsMs) + ", HTTP " + st + " in " + fmtMs(ms));
+  }
+
+  String httpProblem;
+  if (st >= 300 && st < 400) {
+    httpProblem = "Carrier redirects plain HTTP (" + String(st) + ")";
+    info("Redirected to", g_lastRedirect.length() ? g_lastRedirect : String("(no Location header)"));
+    note("The operator is answering instead of the real server: usually a 'buy data pack' / "
+         "captive page when the SIM has no active internet package.");
+  } else {
+    httpProblem = "Plain HTTP failed: " + err;
+  }
+
+  // HTTPS cannot be redirected by the carrier - if it works, the internet path is fine.
+  note("Trying HTTPS instead...");
+  g.useHttps = true;
+  ok = httpGet(CFG_HTTP_TEST_URL, st, len, ms, 45000, err);
+  info("HTTPS GET", st > 0 ? String(st) + " " + httpStatusText(st) + " in " + fmtMs(ms) : err);
+  if (ok && st >= 200 && st < 300) {
+    g.internetOk = true;
+    return warn(c, "INTERNET CONNECTED via HTTPS (" + String(st) + " in " + fmtMs(ms) + ")",
+                httpProblem + "; HTTPS works, speed tests will use HTTPS",
+                "Plain HTTP is intercepted by the operator. Check the SIM's data package / balance "
+                "(redirect target: " + (g_lastRedirect.length() ? g_lastRedirect : String("?")) + ")");
+  }
+  g.useHttps = false;
+  return fail(c, httpProblem + "; HTTPS also failed (" + err + ")",
+              "No real internet access: the SIM most likely has NO ACTIVE DATA PACKAGE / balance. "
+              "DNS works because the operator answers it. Recharge or activate an internet pack, "
+              "then rerun step 8.");
 }
 
 // 8 ---------------------------------------------------------------------------
