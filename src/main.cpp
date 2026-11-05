@@ -698,15 +698,36 @@ static void t_internet(TestCtx& c) {
   // DNS
   uint32_t t0 = millis();
   String cmd = String("AT+CDNSGIP=\"") + CFG_DNS_HOST + "\"";
-  res = modem.cmdUrc(cmd.c_str(), "+CDNSGIP:", 20000, &urc);
+  res = modem.cmdUrc(cmd.c_str(), "+CDNSGIP:", 20000, &urc, &r);
   uint32_t dnsMs = millis() - t0;
-  String f[4];
-  int n = splitCsv(Modem::field(urc, "+CDNSGIP:"), f, 4);
-  if (res != AtResult::OK || n < 3 || f[0].toInt() != 1)
+  // Two reply formats exist:
+  //   documented : +CDNSGIP: 1,"host","ip1"[,"ip2"]   (0,<err> on failure)
+  //   this FW    : +CDNSGIP: <n>,"host","ip"  one line per address (n = 1..N)
+  // -> success = any +CDNSGIP line with a non-zero first field and an address.
+  String ips;
+  int nAddr = 0;
+  String dnsErr = urc;
+  for (int s = 0; s < (int)r.length();) {
+    int e = r.indexOf('\n', s);
+    if (e < 0) e = r.length();
+    String l = r.substring(s, e);
+    s = e + 1;
+    if (!l.startsWith("+CDNSGIP:")) continue;
+    String f[6];
+    int n = splitCsv(l.substring(9), f, 6);
+    if (n < 3 || f[0].toInt() == 0) { dnsErr = l; continue; }
+    for (int k = 2; k < n; k++) {
+      String ip = unquote(f[k]);
+      if (!ip.length()) continue;
+      nAddr++;
+      if (nAddr <= 3) ips += (ips.length() ? ", " : "") + ip;
+    }
+  }
+  if (res != AtResult::OK || nAddr == 0)
     return fail(c, "DNS lookup of " + String(CFG_DNS_HOST) + " failed: " +
-                       (res != AtResult::OK ? modem.lastError : urc),
+                       (res != AtResult::OK ? modem.lastError : dnsErr),
                 "Network has no internet route / DNS; check APN and data balance");
-  info("DNS " CFG_DNS_HOST, unquote(f[2]) + " in " + fmtMs(dnsMs));
+  info("DNS " CFG_DNS_HOST, String(nAddr) + " addresses in " + fmtMs(dnsMs) + " (" + ips + ")");
 
   // HTTP
   int st; long len; uint32_t ms; String err;
