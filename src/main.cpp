@@ -1001,11 +1001,11 @@ static const TestDef TESTS[] = {
   {"Internet (DNS + HTTP)",       t_internet},
   {"Internet speed 4G (LTE)",     t_speed4g},
   {"Internet speed 2G (GSM)",     t_speed2g},
-  {"GNSS power-on",               t_gnssPower},
-  {"GNSS cold start (TTFF)",      t_gnssCold},
-  {"GNSS positioning",            t_gnssPosition},
-  {"GNSS hot start (TTFF)",       t_gnssHot},
-  {"GNSS status (sky view)",      t_gnssStatus},
+  // {"GNSS power-on",               t_gnssPower},
+  // {"GNSS cold start (TTFF)",      t_gnssCold},
+  // {"GNSS positioning",            t_gnssPosition},
+  // {"GNSS hot start (TTFF)",       t_gnssHot},
+  // {"GNSS status (sky view)",      t_gnssStatus},
 };
 static const int N_TESTS = sizeof(TESTS) / sizeof(TESTS[0]);
 static TestResult results[N_TESTS];
