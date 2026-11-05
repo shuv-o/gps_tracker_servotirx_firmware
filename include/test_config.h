@@ -19,7 +19,7 @@
 
 // ---- Speed test targets (kbit/s) ----
 #define CFG_TARGET_4G_KBPS   8000   // 8 Mbit/s on LTE Cat-1 (max 10 Mbit/s)
-#define CFG_TARGET_2G_KBPS   1000   // 1 Mbit/s requested. NOTE: EDGE max ~236 kbit/s,
+#define CFG_TARGET_2G_KBPS    100   // 1 Mbit/s is impossible on 2G: EDGE max ~236 kbit/s,
                                     // GPRS ~85 kbit/s -> realistic target is ~100.
 #define CFG_SPEED_RUNS_4G    2      // best of N downloads
 

@@ -8,21 +8,22 @@
 //   3  SIM card
 //   4  Radio signal (GSM/LTE RF)
 //   5  Network registration
-//   6  Packet data (PDP / IP)
-//   7  Internet (DNS + HTTP)
-//   8  Internet speed - 4G LTE
-//   9  Internet speed - 2G GSM/EDGE
-//  10  GNSS power-on
-//  11  GNSS cold start (TTFF)
-//  12  GNSS positioning
-//  13  GNSS hot start (TTFF)
-//  14  GNSS status (satellites / C/N0)
+//   6  Network status (operator, band, cell, RSRP/RSRQ, IP, time)
+//   7  Packet data (PDP / IP)
+//   8  Internet (DNS + HTTP)
+//   9  Internet speed - 4G LTE
+//  10  Internet speed - 2G GSM/EDGE
+//  11  GNSS power-on
+//  12  GNSS cold start (TTFF)
+//  13  GNSS positioning
+//  14  GNSS hot start (TTFF)
+//  15  GNSS status (satellites / C/N0)
 //  -> Summary + all failure messages
 //
 //  Serial commands (after the run):
-//   a        run all steps        1..14  run one step
-//   s        print summary        p      AT passthrough (#q to exit)
-//   h        help
+//   a        run all steps        1..15  run one step
+//   n        network status now   s      print summary
+//   p        AT passthrough (#q to exit)   h  help
 // =============================================================================
 #include <Arduino.h>
 #include <math.h>
@@ -256,24 +257,44 @@ static bool httpGet(const char* url, int& status, long& len, uint32_t& ms,
 // ----------------------------------------------------------------------------
 //  Speed test
 // ----------------------------------------------------------------------------
+struct SpeedFile { const char* url; long bytes; };   // expected size, used to validate
 struct SpeedServer {
   const char* name;
-  const char* small;      // latency baseline
-  const char* big4g;
-  const char* big4gAlt;   // used if big4g fails (e.g. modem buffer limit)
-  const char* big2g;
+  const char* small;      // latency baseline (nullptr = none)
+  SpeedFile big4g;
+  SpeedFile big4gAlt;     // used if big4g fails (e.g. modem buffer limit)
+  SpeedFile big2g;
 };
 
+// Plain-HTTP servers checked 2026-11-05 (speedtest.tele2.net no longer answers).
 static const SpeedServer SPEED_SERVERS[] = {
-  {"tele2",   "http://speedtest.tele2.net/1KB.zip",
-              "http://speedtest.tele2.net/10MB.zip",
-              "http://speedtest.tele2.net/1MB.zip",
-              "http://speedtest.tele2.net/100KB.zip"},
+  {"Cloudflare", "http://speed.cloudflare.com/__down?bytes=1000",
+     {"http://speed.cloudflare.com/__down?bytes=10000000", 10000000},
+     {"http://speed.cloudflare.com/__down?bytes=2000000",   2000000},
+     {"http://speed.cloudflare.com/__down?bytes=200000",     200000}},
+  {"CacheFly", nullptr,
+     {"http://cachefly.cachefly.net/10mb.test", 10485760},
+     {"http://cachefly.cachefly.net/1mb.test",   1048576},
+     {"http://cachefly.cachefly.net/1mb.test",   1048576}},
   {"httpbin", "http://httpbin.org/bytes/16",
-              "http://httpbin.org/bytes/102400",
-              nullptr,
-              "http://httpbin.org/bytes/102400"},
+     {"http://httpbin.org/bytes/102400", 102400},
+     {nullptr, 0},
+     {"http://httpbin.org/bytes/102400", 102400}},
 };
+
+// A redirect, captive portal or error page also "downloads" in a few hundred bytes,
+// which used to be reported as ~0 Mbit/s. Only accept the real test file.
+static bool downloadValid(const SpeedFile& f, int st, long len, String& e) {
+  if (st != 200) {
+    e = "HTTP " + String(st) + " (" + httpStatusText(st) + ") instead of 200 - not the test file";
+    return false;
+  }
+  if (len < f.bytes * 9 / 10) {
+    e = "server sent only " + String(len) + " of " + String(f.bytes) + " bytes (redirect / blocked page?)";
+    return false;
+  }
+  return true;
+}
 
 static bool runSpeedTest(bool is2g, double& bestKbps, String& err) {
   bestKbps = 0;
@@ -282,30 +303,36 @@ static bool runSpeedTest(bool is2g, double& bestKbps, String& err) {
 
   for (const SpeedServer& s : SPEED_SERVERS) {
     note(String("Server: ") + s.name);
-    int st; long len; uint32_t tSmall; String e;
-    if (!httpGet(s.small, st, len, tSmall, 60000, e)) {
-      note(String("  baseline request failed: ") + e);
-      err = String(s.name) + ": " + e;
-      continue;
+    int st; long len; uint32_t tSmall = 0; String e;
+    if (s.small) {
+      bool ok = httpGet(s.small, st, len, tSmall, 60000, e);
+      if (!ok || st != 200) {
+        note("  baseline request failed: " + (ok ? "HTTP " + String(st) : e));
+        err = String(s.name) + ": " + (ok ? "HTTP " + String(st) : e);
+        continue;
+      }
+      info("Request latency", fmtMs(tSmall) + " (DNS + connect + server, small file)");
     }
-    info("Request latency", fmtMs(tSmall) + " (connect + DNS + server, small file)");
 
-    const char* bigs[2] = { is2g ? s.big2g : s.big4g, is2g ? nullptr : s.big4gAlt };
-    for (const char* url : bigs) {
-      if (!url) continue;
+    const SpeedFile* files[2] = { is2g ? &s.big2g : &s.big4g, is2g ? nullptr : &s.big4gAlt };
+    for (const SpeedFile* f : files) {
+      if (!f || !f->url) continue;
       for (int i = 0; i < runs; i++) {
         uint32_t tBig;
-        if (!httpGet(url, st, len, tBig, bigTimeout, e) || len <= 0) {
-          note(String("  download failed: ") + url + " -> " + e);
+        bool ok = httpGet(f->url, st, len, tBig, bigTimeout, e);
+        info((String("Run ") + (i + 1) + " reply").c_str(),
+             "HTTP " + String(st) + ", " + String(len) + " bytes in " + fmtMs(tBig));
+        if (!ok || !downloadValid(*f, st, len, e)) {
+          note("  rejected: " + e);
           err = String(s.name) + ": " + e;
           break;
         }
         uint32_t payloadMs = (tBig > tSmall + 100) ? tBig - tSmall : tBig;
         double kbps = (len * 8.0) / payloadMs;  // bits per ms == kbit/s
         char b[120];
-        snprintf(b, sizeof b, "%ld bytes in %s (net %s) = %.2f Mbit/s",
-                 len, fmtMs(tBig).c_str(), fmtMs(payloadMs).c_str(), kbps / 1000.0);
-        info((String("Run ") + (i + 1)).c_str(), b);
+        snprintf(b, sizeof b, "%.2f Mbit/s (%.0f kbit/s, transfer %s)",
+                 kbps / 1000.0, kbps, fmtMs(payloadMs).c_str());
+        info((String("Run ") + (i + 1) + " speed").c_str(), b);
         if (kbps > bestKbps) bestKbps = kbps;
       }
       if (bestKbps > 0) return true;
@@ -432,6 +459,128 @@ static void captureSky(SkyView& sv, uint32_t seconds) {
   modem.setVerbose(v);
 }
 
+// ----------------------------------------------------------------------------
+//  Network status report (step 6 and the 'n' command)
+// ----------------------------------------------------------------------------
+struct NetInfo {
+  bool lte = false;
+  int rsrp = 0, rsrq = 0;       // dBm / dB, 0 = unknown
+  int csq = 99;
+  String op, rat;
+};
+
+static const char* qualRsrp(int dbm) {
+  return dbm >= -80 ? "excellent" : dbm >= -90 ? "good" : dbm >= -100 ? "fair" : "poor";
+}
+static const char* qualRsrq(int db) {
+  return db >= -10 ? "excellent" : db >= -15 ? "good" : db >= -20 ? "fair" : "poor";
+}
+
+static NetInfo printNetworkStatus() {
+  NetInfo ni;
+  String r;
+  Serial.println("    ---------------- NETWORK STATUS ----------------");
+
+  // Operator (long name) + access technology
+  modem.cmd("AT+COPS=3,0", 2000);  // report operator as long alphanumeric name
+  if (modem.cmd("AT+COPS?", 5000, &r) == AtResult::OK) {
+    String f[4];
+    int n = splitCsv(Modem::field(r, "+COPS:"), f, 4);
+    ni.op = n >= 3 ? unquote(f[2]) : "(none)";
+    info("Operator", ni.op);
+    if (n >= 4) {
+      int act = f[3].toInt();
+      info("Access technology", act == 7 ? "LTE (4G)" : act == 0 ? "GSM (2G)" :
+                                 act == 3 ? "EDGE (2G)" : act == 2 ? "UTRAN (3G)" : String(act));
+    }
+  }
+
+  if (modem.cmd("AT+CNMP?", 2000, &r) == AtResult::OK) {
+    int m = Modem::field(r, "+CNMP:").toInt();
+    info("Mode preference (CNMP)", String(m) + (m == 2 ? " = automatic" : m == 13 ? " = GSM only" :
+                                     m == 38 ? " = LTE only" : m == 51 ? " = GSM + LTE" : ""));
+  }
+
+  int ce = regStat("AT+CEREG?", "+CEREG:");
+  int cr = regStat("AT+CREG?", "+CREG:");
+  int cg = regStat("AT+CGREG?", "+CGREG:");
+  info("Registration LTE/GSM/GPRS", String(ce) + " / " + cr + " / " + cg + "  (" +
+                                    regText(isRegistered(ce) ? ce : cr) + ")");
+
+  // Serving cell
+  String cpsi;
+  ni.rat = currentRat(&cpsi);
+  String t[16];
+  int n = splitCsv(cpsi, t, 16);
+  if (ni.rat == "LTE" && n >= 10) {
+    ni.lte = true;
+    info("System / state", t[0] + ", " + t[1]);
+    info("MCC-MNC", t[2]);
+    info("Tracking area (TAC)", t[3]);
+    unsigned long cid = strtoul(t[4].c_str(), nullptr, 10);
+    char b[80];
+    snprintf(b, sizeof b, "%lu (0x%lX)  eNB %lu, sector %lu", cid, cid, cid >> 8, cid & 0xFF);
+    info("Cell ID", b);
+    info("Physical cell ID (PCI)", t[5]);
+    info("Band", t[6]);
+    info("EARFCN (DL channel)", t[7]);
+    info("DL / UL bandwidth code", t[8] + " / " + t[9]);
+    if (n >= 14)
+      info("CPSI RSRQ/RSRP/RSSI/SINR", t[10] + " / " + t[11] + " / " + t[12] + " / " + t[13] + "  (raw)");
+  } else {
+    info("Serving cell (CPSI)", cpsi.length() ? cpsi : String("no answer"));
+  }
+
+  // Standard 3GPP measurements: +CESQ: rxlev,ber,rscp,ecno,rsrq,rsrp
+  if (modem.cmd("AT+CESQ", 2000, &r) == AtResult::OK) {
+    String f[6];
+    if (splitCsv(Modem::field(r, "+CESQ:"), f, 6) == 6) {
+      int rxlev = f[0].toInt(), rsrqI = f[4].toInt(), rsrpI = f[5].toInt();
+      if (rsrpI != 255) {
+        ni.rsrp = -141 + rsrpI;
+        info("RSRP (signal power)", String(ni.rsrp) + " dBm  " + qualRsrp(ni.rsrp));
+      }
+      if (rsrqI != 255) {
+        ni.rsrq = (int)lround(-20 + rsrqI * 0.5);
+        info("RSRQ (signal quality)", String(-20 + rsrqI * 0.5, 1) + " dB  " + qualRsrq(ni.rsrq));
+      }
+      if (rxlev != 99) info("GSM RX level", String(-111 + rxlev) + " dBm");
+    }
+  }
+
+  ni.csq = csqRssi();
+  if (ni.csq >= 0 && ni.csq != 99)
+    info("CSQ (RSSI)", String(ni.csq) + " = " + String(-113 + 2 * ni.csq) + " dBm");
+  else
+    info("CSQ (RSSI)", "99 = no signal");
+
+  // Data session
+  if (modem.cmd("AT+CGDCONT?", 3000, &r) == AtResult::OK) {
+    String f[4];
+    splitCsv(Modem::field(r, "+CGDCONT:"), f, 4);
+    info("APN / PDP type", unquote(f[2]) + " / " + unquote(f[1]));
+  }
+  if (modem.cmd("AT+CGATT?", 3000, &r) == AtResult::OK)
+    info("Packet attach", Modem::field(r, "+CGATT:") == "1" ? "attached" : "detached");
+  if (modem.cmd("AT+CGPADDR=1", 3000, &r) == AtResult::OK) {
+    String f[3];
+    int k = splitCsv(Modem::field(r, "+CGPADDR:"), f, 3);
+    info("IPv4 address", k >= 2 ? unquote(f[1]) : String("none"));
+    if (k >= 3) info("IPv6 address", unquote(f[2]));
+  }
+
+  // Misc
+  if (modem.cmd("AT+CCLK?", 2000, &r) == AtResult::OK)
+    info("Network time (CCLK)", unquote(Modem::field(r, "+CCLK:")));
+  if (modem.cmd("AT+CNUM", 3000, &r) == AtResult::OK) {
+    String f[3];
+    int k = splitCsv(Modem::field(r, "+CNUM:"), f, 3);
+    info("Own number (CNUM)", k >= 2 && unquote(f[1]).length() ? unquote(f[1]) : String("not stored on SIM"));
+  }
+  Serial.println("    ------------------------------------------------");
+  return ni;
+}
+
 // =============================================================================
 //  TEST STEPS
 // =============================================================================
@@ -474,6 +623,7 @@ static void t_powerOn(TestCtx& c) {
   modem.cmd("ATE0");
   modem.cmd("AT+CMEE=2");   // verbose error text
   modem.cmd("AT+CNMI=2,1,0,0,0");
+  modem.cmd("AT+COPS=3,0");  // operator as name, not number
   g.atOk = true;
   pass(c, "SIMCOM STARTED - AT ready in " + fmtMs(millis() - t0));
 }
@@ -630,6 +780,22 @@ static void t_register(TestCtx& c) {
 }
 
 // 6 ---------------------------------------------------------------------------
+static void t_netinfo(TestCtx& c) {
+  if (!g.registered) return skip(c, "not registered (step 5)");
+  NetInfo ni = printNetworkStatus();
+  String d = ni.op + " " + ni.rat;
+  if (ni.rsrp) d += ", RSRP " + String(ni.rsrp) + " dBm";
+  if (ni.rsrq) d += ", RSRQ " + String(ni.rsrq) + " dB";
+  if (ni.lte && ni.rsrp && ni.rsrp < -100)
+    return warn(c, d, "Weak LTE signal (RSRP < -100 dBm)",
+                "Expect low speed; check LTE antenna, U.FL cable and placement");
+  if (ni.lte && ni.rsrq && ni.rsrq < -15)
+    return warn(c, d, "Poor LTE quality (RSRQ < -15 dB)",
+                "Cell is loaded or interference is high; speed will be limited");
+  pass(c, d);
+}
+
+// 7 ---------------------------------------------------------------------------
 static void t_packet(TestCtx& c) {
   if (!g.registered) return skip(c, "not registered (step 5)");
   String r;
@@ -681,7 +847,7 @@ static void t_packet(TestCtx& c) {
 
 // 7 ---------------------------------------------------------------------------
 static void t_internet(TestCtx& c) {
-  if (!g.dataUp) return skip(c, "no packet data (step 6)");
+  if (!g.dataUp) return skip(c, "no packet data (step 7)");
   String urc, r;
   AtResult res = modem.cmdUrc("AT+NETOPEN", "+NETOPEN:", 30000, &urc, &r);
   if (res == AtResult::OK) {
@@ -740,7 +906,7 @@ static void t_internet(TestCtx& c) {
 
 // 8 ---------------------------------------------------------------------------
 static void t_speed4g(TestCtx& c) {
-  if (!g.internetOk) return skip(c, "no internet (step 7)");
+  if (!g.internetOk) return skip(c, "no internet (step 8)");
   String rat = currentRat();
   info("Current radio", rat);
   note("Download happens inside the modem; UART speed does not limit this test.");
@@ -792,7 +958,7 @@ static void restoreAutoMode() {
 }
 
 static void t_speed2g(TestCtx& c) {
-  if (!g.internetOk) return skip(c, "no internet (step 7)");
+  if (!g.internetOk) return skip(c, "no internet (step 8)");
   note("Forcing GSM-only mode (AT+CNMP=13)");
   if (modem.cmd("AT+CNMP=13", 10000) != AtResult::OK)
     return fail(c, "Modem refused GSM-only mode: " + modem.lastError, "Firmware may not support 2G");
@@ -870,7 +1036,7 @@ static void t_gnssPower(TestCtx& c) {
 
 // 11 --------------------------------------------------------------------------
 static void t_gnssCold(TestCtx& c) {
-  if (!g.gnssOn) return skip(c, "GNSS not powered (step 10)");
+  if (!g.gnssOn) return skip(c, "GNSS not powered (step 11)");
   g.gnssFixed = false;
   note("Cold start clears ephemeris/almanac/time. Device must be under OPEN SKY.");
   if (modem.cmd("AT+CGPSCOLD", 5000) != AtResult::OK)
@@ -880,23 +1046,23 @@ static void t_gnssCold(TestCtx& c) {
   uint32_t ttff = waitForFix(CFG_GNSS_COLD_TIMEOUT_S, f);
   if (!ttff)
     return fail(c, "No GNSS fix after cold start (" + String(CFG_GNSS_COLD_TIMEOUT_S) + " s)",
-                "Go outdoors / open sky. If step 14 shows 0 satellites: RF path pin 90 -> "
+                "Go outdoors / open sky. If step 15 shows 0 satellites: RF path pin 90 -> "
                 "TA1343A SAW -> antenna, R13, antenna type (active needs AT+CVAUXS=1)");
   g.gnssFixed = true;
   g.fix = f;
   info("Time to first fix", fmtMs(ttff));
   String d = "Cold start TTFF " + fmtMs(ttff);
   if (ttff > 120000)
-    return warn(c, d, "Cold TTFF slow (> 120 s)", "Weak satellite signal; check antenna / C/N0 in step 14");
+    return warn(c, d, "Cold TTFF slow (> 120 s)", "Weak satellite signal; check antenna / C/N0 in step 15");
   pass(c, d);
 }
 
 // 12 --------------------------------------------------------------------------
 static void t_gnssPosition(TestCtx& c) {
-  if (!g.gnssOn) return skip(c, "GNSS not powered (step 10)");
+  if (!g.gnssOn) return skip(c, "GNSS not powered (step 11)");
   GnssFix f;
   if (!readFix(f)) {
-    if (!g.gnssFixed) return skip(c, "no GNSS fix (step 11)");
+    if (!g.gnssFixed) return skip(c, "no GNSS fix (step 12)");
     return fail(c, "Fix lost: AT+CGNSSINFO has no position", "Signal dropped; check antenna / sky view");
   }
   g.fix = f;
@@ -921,8 +1087,8 @@ static void t_gnssPosition(TestCtx& c) {
 
 // 13 --------------------------------------------------------------------------
 static void t_gnssHot(TestCtx& c) {
-  if (!g.gnssOn) return skip(c, "GNSS not powered (step 10)");
-  if (!g.gnssFixed) return skip(c, "hot start needs a previous fix (step 11 failed)");
+  if (!g.gnssOn) return skip(c, "GNSS not powered (step 11)");
+  if (!g.gnssFixed) return skip(c, "hot start needs a previous fix (step 12 failed)");
   if (modem.cmd("AT+CGPSHOT", 5000) != AtResult::OK)
     return fail(c, "AT+CGPSHOT rejected: " + modem.lastError, "GNSS engine not running");
   delay(1000);
@@ -935,13 +1101,13 @@ static void t_gnssHot(TestCtx& c) {
   String d = "Hot start TTFF " + fmtMs(ttff + 1000);
   if (ttff + 1000 > CFG_GNSS_HOT_TARGET_S * 1000UL)
     return warn(c, d, "Hot start slower than " + String(CFG_GNSS_HOT_TARGET_S) + " s",
-                "Weak signal; check C/N0 in step 14");
+                "Weak signal; check C/N0 in step 15");
   pass(c, d);
 }
 
 // 14 --------------------------------------------------------------------------
 static void t_gnssStatus(TestCtx& c) {
-  if (!g.gnssOn) return skip(c, "GNSS not powered (step 10)");
+  if (!g.gnssOn) return skip(c, "GNSS not powered (step 11)");
   static SkyView sv;
   sv = SkyView();
   note("Capturing NMEA for " + String(CFG_GNSS_SKYVIEW_S) + " s...");
@@ -997,6 +1163,7 @@ static const TestDef TESTS[] = {
   {"SIM card",                    t_sim},
   {"Radio signal (GSM/LTE)",      t_signal},
   {"Network registration",        t_register},
+  {"Network status (cell info)",  t_netinfo},
   {"Packet data (PDP / IP)",      t_packet},
   {"Internet (DNS + HTTP)",       t_internet},
   {"Internet speed 4G (LTE)",     t_speed4g},
@@ -1078,8 +1245,8 @@ static void runAll() {
 
 static void printHelp() {
   Serial.println();
-  Serial.println("Commands:  a = run all   1..14 = run one step   s = summary");
-  Serial.println("           p = AT passthrough (#q to exit)       h = help");
+  Serial.printf("Commands:  a = run all   1..%d = run one step   n = network status\n", N_TESTS);
+  Serial.println("           s = summary   p = AT passthrough (#q to exit)   h = help");
   for (int i = 0; i < N_TESTS; i++) Serial.printf("   %2d  %s\n", i + 1, TESTS[i].name);
 }
 
@@ -1149,6 +1316,7 @@ void loop() {
     if (!in.length()) continue;
     if (in == "a") { runAll(); printHelp(); }
     else if (in == "s") printSummary();
+    else if (in == "n") { if (g.atOk) printNetworkStatus(); else Serial.println("Run step 1 first (modem not started)"); }
     else if (in == "p") passthrough();
     else if (in == "h") printHelp();
     else {
