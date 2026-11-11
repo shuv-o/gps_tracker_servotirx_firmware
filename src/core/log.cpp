@@ -11,7 +11,7 @@ static size_t s_size = 0, s_head = 0;
 static bool s_wrapped = false;
 static volatile uint8_t s_level = LOG_INFO;
 static volatile bool s_echo = true;
-static volatile uint32_t s_errors = 0, s_warns = 0;
+static uint32_t s_errors = 0, s_warns = 0;  // updated atomically
 
 void begin(size_t ringBytes) {
   s_mtx = xSemaphoreCreateMutex();
@@ -46,8 +46,8 @@ void write(uint8_t lvl, const char* tag, const char* fmt, ...) {
   line[n++] = '\n';
   line[n] = 0;
 
-  if (lvl == LOG_ERROR) s_errors++;
-  if (lvl == LOG_WARN) s_warns++;
+  if (lvl == LOG_ERROR) __atomic_fetch_add(&s_errors, 1, __ATOMIC_RELAXED);
+  if (lvl == LOG_WARN) __atomic_fetch_add(&s_warns, 1, __ATOMIC_RELAXED);
 
   if (s_mtx) xSemaphoreTake(s_mtx, portMAX_DELAY);
   if (s_echo) Serial.write((const uint8_t*)line, n);

@@ -3,8 +3,8 @@
 #include "core/log.h"
 #include "core/supervisor.h"
 
-static volatile uint32_t s_ring = 0;
-static void IRAM_ATTR onRing() { s_ring++; }
+static uint32_t s_ring = 0;  // written only by the ISR
+static void IRAM_ATTR onRing() { __atomic_fetch_add(&s_ring, 1, __ATOMIC_RELAXED); }
 
 static void waitMs(uint32_t ms) {
   uint32_t t0 = millis();
@@ -62,6 +62,6 @@ void hardReset() {
 }
 
 void setAwake(bool awake) { digitalWrite(PIN_MODEM_DTR, awake ? HIGH : LOW); }
-uint32_t ringCount() { return s_ring; }
+uint32_t ringCount() { return __atomic_load_n(&s_ring, __ATOMIC_RELAXED); }
 
 }  // namespace modemhw

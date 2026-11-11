@@ -24,4 +24,4 @@
 #define PIN_CAN_INT   4   // active LOW
 
 // ---------- Misc ----------
-#define PIN_RGB_LED  21   // addressable RGB LED data
+#define PIN_STATUS_LED 21   // addressable RGB LED data (core 3.x defines PIN_RGB_LED=48 for the devkit)

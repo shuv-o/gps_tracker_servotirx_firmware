@@ -3,6 +3,7 @@
 #include <esp_core_dump.h>
 #include <esp_ota_ops.h>
 #include <esp_system.h>
+#include <esp_idf_version.h>
 #include <esp_task_wdt.h>
 #include "core/config.h"
 #include "core/counters.h"
@@ -112,7 +113,12 @@ void begin() {
   if (esp_ota_get_state_partition(run, &st) == ESP_OK && st == ESP_OTA_IMG_PENDING_VERIFY) s_otaPending = true;
 
   // Hardware task watchdog: 30 s, panic (-> reboot + core dump) on expiry
-  esp_task_wdt_init(30, true);
+#if ESP_IDF_VERSION_MAJOR >= 5
+  esp_task_wdt_config_t wdt = {.timeout_ms = 30000, .idle_core_mask = 0, .trigger_panic = true};
+  if (esp_task_wdt_reconfigure(&wdt) != ESP_OK) esp_task_wdt_init(&wdt);
+#else
+  esp_task_wdt_init(30, true);  // IDF 4.4: re-configures the already running watchdog
+#endif
 
   LOGI(TAG, "boot #%lu reason=%s abnormal=%d (streak %lu)%s%s", (unsigned long)s_bootCount, s_reason,
        s_abnormal, (unsigned long)s_rtc.abnormalResets, s_safe ? " SAFE MODE" : "",

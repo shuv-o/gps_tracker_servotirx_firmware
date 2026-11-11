@@ -12,8 +12,8 @@ static const SPISettings SPI_CFG(8000000, MSBFIRST, SPI_MODE0);
 enum : uint16_t {
   REG_ID0 = 0x0000, REG_ID1 = 0x0004, REG_REV = 0x0008, REG_SPI_STATUS = 0x000C,
   REG_MODE = 0x0800, REG_DEV_IR = 0x0820, REG_DEV_IE = 0x0830,
-  MRAM = 0x8000, MRAM_SIZE = 0x0800,
 };
+static constexpr uint16_t MRAM = 0x8000, MRAM_SIZE = 0x0800;
 // ---- M_CAN registers (base 0x1000)
 enum : uint16_t {
   M_TEST = 0x1010, M_CCCR = 0x1018, M_NBTP = 0x101C, M_TSCC = 0x1020, M_ECR = 0x1040, M_PSR = 0x1044,
@@ -26,7 +26,7 @@ enum : uint32_t { CCCR_INIT = 1u << 0, CCCR_CCE = 1u << 1, CCCR_MON = 1u << 5, C
 enum : uint32_t { MODE_SEL_MASK = 0xC0, MODE_STANDBY = 0x40, MODE_NORMAL = 0x80, MODE_WD_EN = 0x04,
                   MODE_DEV_RESET = 0x02 };
 // MRAM layout (offsets inside MRAM)
-enum : uint16_t { SID_OFS = 0x000, XID_OFS = 0x010, RXF0_OFS = 0x020, RXF0_N = 32, TXB_OFS = 0x300, TXB_N = 8 };
+static constexpr uint16_t SID_OFS = 0x000, XID_OFS = 0x010, RXF0_OFS = 0x020, RXF0_N = 32, TXB_OFS = 0x300, TXB_N = 8;
 
 // ---------------------------------------------------------------- SPI
 void Tcan4550::rdN(uint16_t addr, uint32_t* out, uint8_t n) {
