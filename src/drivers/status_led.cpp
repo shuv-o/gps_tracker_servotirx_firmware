@@ -1,12 +1,21 @@
 #include "drivers/status_led.h"
 #include "board_pins.h"
 
+// neopixelWrite() was renamed rgbLedWrite() in Arduino-ESP32 3.x
+static inline void ledWrite(uint8_t r, uint8_t g, uint8_t b) {
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  rgbLedWrite(PIN_STATUS_LED, r, g, b);
+#else
+  neopixelWrite(PIN_STATUS_LED, r, g, b);
+#endif
+}
+
 namespace led {
 
 static Pattern s_p = BOOT;
 static uint8_t s_phase = 0;
 
-void begin() { neopixelWrite(PIN_RGB_LED, 0, 0, 8); }
+void begin() { ledWrite(0, 0, 8); }
 void set(Pattern p) { s_p = p; }
 
 void tick() {
@@ -24,7 +33,7 @@ void tick() {
     case FAULT:           if (pulse || s_phase == 2) r = 20; break;
     case OTA:             r = 10; b = 14; break;
   }
-  neopixelWrite(PIN_RGB_LED, r, g, b);
+  ledWrite(r, g, b);
 }
 
 }  // namespace led

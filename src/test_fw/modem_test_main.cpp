@@ -109,7 +109,7 @@ static void info(const char* key, const String& val) {
 }
 static void note(const String& s) { Serial.printf("    * %s\n", s.c_str()); }
 
-static void led(uint8_t r, uint8_t gg, uint8_t b) { neopixelWrite(PIN_RGB_LED, r, gg, b); }
+static void led(uint8_t r, uint8_t gg, uint8_t b) { neopixelWrite(PIN_STATUS_LED, r, gg, b); }
 
 static String fmtMs(uint32_t ms) {
   char b[24];
