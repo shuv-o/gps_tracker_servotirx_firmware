@@ -488,7 +488,9 @@ void setup() {
   testChip();
   WiFi.onEvent(onWifiEvent);
   WiFi.mode(WIFI_AP_STA);
-  WiFi.setSleep(false);
+  // Wi-Fi modem sleep MUST stay enabled when Bluetooth runs too, otherwise the
+  // Wi-Fi/BT coexistence code aborts in esp_bt_controller_enable().
+  WiFi.setSleep(true);
   testWifiScan();
   testAccessPoint();
   testStation(CFG_STA_SSID, CFG_STA_PASSWORD);
