@@ -258,6 +258,9 @@ static void processNmea(const String& line) {
     g_con[c].viewSeen = now;
     for (int i = 4; i + 3 < n; i += 4) {
       int prn = f[i].toInt();
+      // GLONASS before the slot number is known reports an EMPTY PRN but a real
+      // C/N0 ("$GLGSV,1,1,01,,,,30"): keep it under a placeholder id (shown as "?")
+      if (prn <= 0 && f[i + 3].length()) prn = 250 + (f[2].toInt() - 1) * 4 + (i - 4) / 4;
       if (prn <= 0) continue;
       int el = f[i + 1].length() ? f[i + 1].toInt() : -1;
       int az = f[i + 2].length() ? f[i + 2].toInt() : -1;
@@ -337,7 +340,7 @@ static void printDash() {
     Constel& k = g_con[c];
     for (int i = 0; i < k.n; i++)
       if (k.s[i].snr > 0 && now - k.s[i].seen <= CFG_SAT_STALE_MS)
-        s += String(CPFX[c]) + String(k.s[i].prn) + ":" + String(k.s[i].snr) + " ";
+        s += String(CPFX[c]) + (k.s[i].prn >= 250 ? String("?") : String(k.s[i].prn)) + ":" + String(k.s[i].snr) + " ";
     Serial.printf("         %-8s view %2d  trk %2d | %s\n", CNAME[c], g_st.view[c], g_st.trk[c], s.c_str());
   }
   if (fixed)
@@ -363,7 +366,7 @@ static void printTable() {
       String az = s.az >= 0 ? String(s.az) : "-";
       String q = s.snr == 0 ? "not tracked" : s.snr >= CFG_CN0_GOOD ? "strong" : s.snr >= CFG_CN0_OK ? "ok"
                  : s.snr >= CFG_CN0_WEAK ? "weak" : "very weak";
-      Serial.printf("  %c%-4u %5s %5s  %4s  %-16s %s\n", CPFX[c], s.prn, el.c_str(), az.c_str(),
+      Serial.printf("  %c%-4s %5s %5s  %4s  %-16s %s\n", CPFX[c], s.prn >= 250 ? "?" : String(s.prn).c_str(), el.c_str(), az.c_str(),
                     s.snr ? String(s.snr).c_str() : "--", bar(s.snr).c_str(), q.c_str());
       rows++;
     }
